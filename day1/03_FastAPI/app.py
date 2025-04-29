@@ -10,6 +10,7 @@ from typing import Optional, List, Dict, Any
 import uvicorn
 import nest_asyncio
 from pyngrok import ngrok
+import requests
 
 # --- 設定 ---
 # モデル名を設定
@@ -62,24 +63,51 @@ model = None
 
 def load_model():
     """推論用のLLMモデルを読み込む"""
-    global model  # グローバル変数を更新するために必要
+    global model
     try:
+        if not config.MODEL_NAME:
+            raise ValueError("モデル名が設定されていません")
+            
         device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"使用デバイス: {device}")
+        
+        # モデルキャッシュの存在確認
+        if not os.path.exists(config.MODEL_NAME):
+            print(f"警告: ローカルモデル '{config.MODEL_NAME}' が見つかりません。ダウンロードを試みます...")
+            
         pipe = pipeline(
             "text-generation",
             model=config.MODEL_NAME,
-            model_kwargs={"torch_dtype": torch.bfloat16},
+            model_kwargs={
+                "torch_dtype": torch.bfloat16,
+                "cache_dir": "./model_cache"  # 明示的なキャッシュディレクトリ
+            },
             device=device
         )
+        
+        # メモリ使用量の確認
+        if torch.cuda.is_available():
+            print(f"GPUメモリ使用量: {torch.cuda.memory_allocated()/1024**3:.2f}GB")
+            
         print(f"モデル '{config.MODEL_NAME}' の読み込みに成功しました")
-        model = pipe  # グローバル変数を更新
+        model = pipe
         return pipe
+        
     except Exception as e:
-        error_msg = f"モデル '{config.MODEL_NAME}' の読み込みに失敗: {e}"
-        print(error_msg)
-        traceback.print_exc()  # 詳細なエラー情報を出力
-        return None
+        error_msg = f"モデル読み込みエラー: {type(e).__name__} - {str(e)}"
+        print(f"致命的なエラー: {error_msg}")
+        traceback.print_exc()
+        
+        # 特定のエラータイプに基づく追加情報
+        if "NotFound" in str(e):
+            error_msg += "\n解決策: モデル名が正しいか確認してください"
+        elif "CUDA out of memory" in str(e):
+            error_msg += f"\n解決策: バッチサイズを減らすか、GPUメモリを増やしてください (現在 {torch.cuda.memory_allocated()/1024**3:.2f}GB 使用中)"
+            
+        raise HTTPException(
+            status_code=503,
+            detail=error_msg
+        ) from e
 
 def extract_assistant_response(outputs, user_prompt):
     """モデルの出力からアシスタントの応答を抽出する"""
@@ -261,6 +289,7 @@ def run_with_ngrok(port=8501):
         print(f"📖 APIドキュメント (Swagger UI): {public_url}/docs")
         print("---------------------------------------------------------------------")
         print("(APIクライアントやブラウザからアクセスするためにこのURLをコピーしてください)")
+
         uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")  # ログレベルをinfoに設定
 
     except Exception as e:
